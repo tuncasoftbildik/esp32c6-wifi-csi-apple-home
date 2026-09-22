@@ -1,4 +1,17 @@
+<div align="center">
+
+<img src="assets/banner.png" alt="ESP32-C6 Wi-Fi CSI presence sensor in Apple Home" width="100%">
+
 # ESP32-C6 → camera-free presence sensor in Apple Home
+
+[![ESP32-C6](https://img.shields.io/badge/ESP32--C6-RISC--V-E7352C?logo=espressif&logoColor=white)](https://www.espressif.com/en/products/socs/esp32-c6)
+[![Apple Home](https://img.shields.io/badge/Apple%20Home-Matter-111111?logo=apple&logoColor=white)](https://www.apple.com/home-app/)
+[![Matter](https://img.shields.io/badge/Matter-over%20Wi--Fi-3f6ee6)](https://csa-iot.org/all-solutions/matter/)
+[![Wi-Fi CSI](https://img.shields.io/badge/Wi--Fi-CSI%20sensing-00b3b3)](https://github.com/espressif/esp-csi)
+[![License: MIT](https://img.shields.io/badge/License-MIT-3da639)](LICENSE)
+[![Stars](https://img.shields.io/github/stars/tuncasoftbildik/esp32c6-wifi-csi-apple-home?style=social)](https://github.com/tuncasoftbildik/esp32c6-wifi-csi-apple-home)
+
+</div>
 
 Turn a cheap **ESP32-C6** board into a **camera-free, PIR-free occupancy sensor**
 that appears natively in **Apple Home** over Matter — no hub bridge, no Home
@@ -30,6 +43,16 @@ gotcha that stands between "flashed" and "actually detects people."
 
 CSI reads the amplitude/phase distortion of ordinary Wi-Fi packets, so there is
 no camera and no microphone — just the radio the chip already has.
+
+## How it works
+
+```mermaid
+flowchart LR
+    P["🧍 Person<br/>(moving or still)"] -. "disturbs<br/>Wi-Fi waves" .-> E["📡 ESP32-C6<br/>Wi-Fi CSI"]
+    E == "Matter over Wi-Fi" ==> H["🔊 HomePod / Apple TV<br/>(Home Hub)"]
+    H --> A["🏠 Apple Home<br/>Occupancy: Detected / Clear"]
+    E -. "local Direct HTTP<br/>tune.py" .-> E
+```
 
 ## Hardware
 
