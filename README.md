@@ -140,6 +140,7 @@ that is normal for a non-commercial Matter device and is harmless.
 Put your computer on the **same network as the device**, then:
 
 ```bash
+python3 scripts/tune.py --host <device-ip> doctor     # one-shot health check + ordered fixes
 python3 scripts/tune.py --host <device-ip> status     # signal, CSI, threshold
 python3 scripts/tune.py --host <device-ip> scan       # list APs by strength
 python3 scripts/tune.py --host <device-ip> pin AA:BB:CC:DD:EE:FF   # lock the strongest AP
@@ -155,6 +156,10 @@ calibrated **threshold ~0.03–0.1**, and `watch` showing ~0.001 when still and
 ---
 
 ## Troubleshooting — the gotchas that cost the most time
+
+> **Shortcut:** `tune.py --host <ip> doctor` runs every check below in one shot —
+> signal strength, wrong mesh node, blocked CSI, noisy calibration — and prints
+> an ordered list of fixes. Start there; the sections below explain each finding.
 
 **Apple Home says "No Response" right after adding.**
 The device and the Home Hub must be on the **same normal network**. Guest
