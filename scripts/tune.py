@@ -22,6 +22,7 @@ Stdlib only. Find the device IP from your Home app, router, or mDNS
 """
 import argparse
 import json
+import math
 import sys
 import time
 import urllib.request
@@ -51,6 +52,21 @@ def diag(host, fields):
     return call(host, f"/diagnostics?fields={q}")
 
 
+def valid_number(value):
+    return type(value) in (int, float) and math.isfinite(value)
+
+
+def same_network_aps(aps, ssid):
+    """Only recommend identifiable APs advertising the connected network."""
+    if not isinstance(ssid, str) or not ssid or not isinstance(aps, list):
+        return []
+    return sorted((a for a in aps if isinstance(a, dict)
+                   and a.get("ssid") == ssid
+                   and isinstance(a.get("bssid"), str) and a["bssid"]
+                   and valid_number(a.get("rssi_dbm"))),
+                  key=lambda a: a["rssi_dbm"], reverse=True)
+
+
 def cmd_status(host):
     s = call(host, "/sensing")
     w = call(host, "/wifi")
@@ -67,6 +83,7 @@ def cmd_status(host):
 
 
 def cmd_scan(host):
+    w = call(host, "/wifi")
     call(host, "/wifi/scans", method="POST")
     for _ in range(8):
         time.sleep(3)
@@ -74,15 +91,17 @@ def cmd_scan(host):
         if not isinstance(d, dict) or d.get("scanning"):
             print("  scanning...")
             continue
-        aps = sorted(d.get("access_points", []),
-                     key=lambda a: a.get("rssi_dbm", -999), reverse=True)
+        aps = same_network_aps(d.get("access_points"), w.get("ssid"))
         print(f"=== {len(aps)} access points (strongest first) ===")
         for a in aps:
             r = a.get("rssi_dbm")
             tag = "STRONG" if r >= -60 else ("ok" if r >= -68 else "weak")
             print(f"  {r:>4} dBm  [{tag:6}]  ch{a.get('channel')}  "
                   f"{a.get('bssid')}  {a.get('ssid') or '(hidden)'}")
-        print("\nPin the strongest with:  tune.py --host <ip> pin <BSSID>")
+        if aps:
+            print("\nPin the strongest AP on your SSID with:  tune.py --host <ip> pin <BSSID>")
+        else:
+            print("No suitable AP found for the connected SSID; no pin recommendation.")
         return
     print("  scan did not complete")
 
@@ -103,18 +122,31 @@ def cmd_traffic(host, mode):
     print("     drop ICMP -> try `dns`. Re-run `calibrate` after changing traffic mode.")
 
 
-def cmd_calibrate(host):
-    print(">>> EMPTY the room and stay out for ~30 s. Calibration learns the quiet baseline;")
-    print(">>> any movement during it inflates the threshold and detection stops working.")
+def cmd_calibrate(host, timeout=60):
+    print(">>> EMPTY the room and stay out until calibration completes.")
     print("starting in 10 s...")
     time.sleep(10)
     call(host, "/sensing/calibrations", method="POST")
-    for i in range(8):
-        time.sleep(5)
-        s = call(host, "/sensing")
-        print(f"  [{(i+1)*5}s] calibrating={s.get('calibrating')} ready={s.get('ready')} "
-              f"threshold={round(s.get('threshold', 0), 4)}")
-    print("done. A low, stable threshold (~0.03-0.1) with ready=True is good.")
+    started = time.monotonic()
+    deadline = started + timeout
+    while time.monotonic() < deadline:
+        time.sleep(min(5, max(0, deadline - time.monotonic())))
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            break
+        s = call(host, "/sensing", timeout=min(10, remaining))
+        if not isinstance(s, dict):
+            print("  Invalid calibration status; waiting for a valid response...")
+            continue
+        print(f"  [{time.monotonic() - started:.0f}s] calibrating={s.get('calibrating')} "
+              f"ready={s.get('ready')} threshold={s.get('threshold')}")
+        if (time.monotonic() < deadline and s.get("calibrating") is False
+                and s.get("ready") is True):
+            print("done. Device reports calibration finished and detector ready.")
+            return 0
+    print(f"Calibration timed out after {timeout}s: completion was not confirmed. "
+          "Check `status` before retrying.", file=sys.stderr)
+    return 1
 
 
 def cmd_watch(host):
@@ -140,10 +172,18 @@ def cmd_doctor(host):
     prints an ordered list of fixes."""
     print("ESPectre CSI — health check\n")
     problems = []
+    unknown = []
 
-    s = call(host, "/sensing")
-    w = call(host, "/wifi")
-    d = diag(host, ["csi_occupancy", "csi_accepted_pps", "traffic_tx_pps", "wifi_rssi_dbm"])
+    try:
+        s = call(host, "/sensing")
+        w = call(host, "/wifi")
+        d = diag(host, ["csi_occupancy", "csi_accepted_pps", "traffic_tx_pps", "wifi_rssi_dbm"])
+    except (urllib.error.URLError, OSError) as exc:
+        print(f"  => Insufficient measurements. Device status could not be read: {exc}")
+        return 2
+    s = s if isinstance(s, dict) else {}
+    w = w if isinstance(w, dict) else {}
+    d = d if isinstance(d, dict) else {}
     rssi = w.get("rssi_dbm")
     occ = d.get("csi_occupancy")
     acc = d.get("csi_accepted_pps")
@@ -155,7 +195,7 @@ def cmd_doctor(host):
     cur_bssid = w.get("bssid")
 
     # 1) Signal strength — CSI quality is dominated by RSSI.
-    if isinstance(rssi, (int, float)):
+    if valid_number(rssi):
         if rssi >= -60:
             print(f"  Wi-Fi ......... {rssi} dBm   OK (strong)")
         elif rssi >= -68:
@@ -165,6 +205,7 @@ def cmd_doctor(host):
             problems.append("get a stronger link: `scan` then `pin` the best AP, or move closer / add an AP")
     else:
         print("  Wi-Fi ......... unknown")
+        unknown.append("Wi-Fi signal is missing or invalid")
 
     # 2) Mesh — is a much stronger AP available that we are NOT on?
     best = None
@@ -174,57 +215,75 @@ def cmd_doctor(host):
             time.sleep(3)
             sc = call(host, "/wifi/access-points")
             if isinstance(sc, dict) and not sc.get("scanning"):
-                aps = sorted((sc.get("access_points") or []),
-                             key=lambda a: a.get("rssi_dbm", -999), reverse=True)
+                aps = same_network_aps(sc.get("access_points"), w.get("ssid"))
                 best = aps[0] if aps else None
                 break
     except (urllib.error.URLError, OSError):
         pass
-    if best and isinstance(best.get("rssi_dbm"), (int, float)) and isinstance(rssi, (int, float)):
-        if best.get("bssid") != cur_bssid and best["rssi_dbm"] > rssi + 6:
+    if best and cur_bssid and valid_number(rssi):
+        if best.get("bssid").lower() != str(cur_bssid).lower() and best["rssi_dbm"] > rssi + 6:
             print(f"  Mesh .......... STRONGER AP available: {best['rssi_dbm']} dBm {best['bssid']} "
                   f"(you are on {rssi} dBm) — device latched onto a far node.")
             problems.append(f"pin the strong node: `pin {best['bssid']}`")
         else:
-            print("  Mesh .......... on the strongest reachable AP   OK")
+            print("  Mesh .......... no significantly stronger AP on the connected SSID   OK")
+    else:
+        unknown.append("mesh comparison unavailable: scan incomplete or connected network/AP data missing")
 
     # 3) CSI flow — 0 accepted while traffic is going out = router drops the probe.
-    if isinstance(acc, (int, float)) and acc < 1:
-        if isinstance(tx, (int, float)) and tx > 0:
+    if valid_number(acc) and 0 <= acc < 1:
+        if valid_number(tx) and tx > 0:
             print(f"  CSI flow ...... accepted_pps={acc} (tx={tx})   BLOCKED — router likely drops the gateway probe.")
             problems.append("switch traffic to DNS: `traffic dns`")
         else:
             print(f"  CSI flow ...... accepted_pps={acc}, tx={tx}   no traffic")
             problems.append("check Wi-Fi association and traffic mode")
-    elif acc is not None:
+    elif valid_number(acc) and acc >= 1:
         print(f"  CSI flow ...... accepted_pps={acc}   OK (generator={gen})")
+    else:
+        unknown.append("CSI accepted packet rate is missing or invalid")
 
     # 4) Occupancy — fraction of the detector window with valid CSI.
-    if isinstance(occ, (int, float)):
+    if valid_number(occ) and 0 <= occ <= 1:
         if occ >= 0.7:
             print(f"  Occupancy ..... {occ:.0%}   OK")
         else:
-            print(f"  Occupancy ..... {occ:.0%}   low (want > 70%)")
+            print(f"  Occupancy ..... {occ:.0%}   low (want >= 70%)")
+            problems.append("low CSI window coverage: check signal and traffic mode, then measure again")
+    else:
+        unknown.append("CSI window coverage is missing or invalid")
 
     # 5) Calibration / detector readiness.
-    if calibrating:
+    if calibrating is True:
         print("  Detector ...... calibrating now...")
-    elif not ready:
+        unknown.append("calibration is still running; repeat doctor when it completes")
+    elif type(calibrating) is not bool or type(ready) is not bool:
+        unknown.append("detector readiness/calibration state is missing or invalid")
+    elif ready is False:
         print("  Detector ...... NOT ready")
         problems.append("recalibrate in an EMPTY room: `calibrate`")
-    elif isinstance(thr, (int, float)) and thr > 0.3:
+    elif not valid_number(thr) or thr < 0:
+        unknown.append("detector threshold is missing or invalid")
+    elif thr > 0.3:
         print(f"  Detector ...... ready but threshold={thr:.3f}   TOO HIGH (calibrated while the room was active)")
         problems.append("recalibrate with the room EMPTY: `calibrate`")
     else:
         print(f"  Detector ...... ready, threshold={round(thr or 0, 4)}   OK")
 
     print()
+    for item in unknown:
+        print(f"  Measurement unavailable: {item}")
     if problems:
-        print(f"  => {len(problems)} issue(s) found — fix in this order:")
+        print(f"  => Problems found: {len(problems)} issue(s) — fix in this order:")
         for i, p in enumerate(problems, 1):
             print(f"     {i}. {p}")
+        return 1
+    elif unknown:
+        print("  => Insufficient measurements. Health cannot be confirmed.")
+        return 2
     else:
         print("  => Healthy. Run `watch` and walk near the device to confirm detection.")
+        return 0
 
 
 def main():
@@ -240,7 +299,7 @@ def main():
     sub.add_parser("doctor")
     a = ap.parse_args()
     try:
-        {"status": lambda: cmd_status(a.host),
+        return {"status": lambda: cmd_status(a.host),
          "scan": lambda: cmd_scan(a.host),
          "pin": lambda: cmd_pin(a.host, a.bssid),
          "traffic": lambda: cmd_traffic(a.host, a.mode),
@@ -254,4 +313,4 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

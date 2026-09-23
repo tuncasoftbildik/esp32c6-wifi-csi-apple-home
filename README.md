@@ -63,6 +63,9 @@ flowchart LR
 - For the Apple Home step: a **Home Hub** — HomePod / HomePod mini / Apple TV.
   Apple requires one to add any Matter accessory.
 
+Current helper-script release: **v0.1.0**. See [CHANGELOG.md](CHANGELOG.md).
+This version is independent of the ESPectre firmware version.
+
 ## What's in this repo
 
 | File | Purpose |
@@ -149,6 +152,25 @@ python3 scripts/tune.py --host <device-ip> calibrate  # EMPTY the room first
 python3 scripts/tune.py --host <device-ip> watch      # walk around, watch the score
 ```
 
+`scan` and `doctor` only consider access points advertising the currently
+connected SSID, with usable BSSID and signal data. Hidden or unrelated networks
+are not pin candidates. Sharing an SSID does not by itself verify that an AP is
+trusted; verify the BSSID against your router before pinning it.
+
+`doctor` reports one of three results and returns a matching exit code:
+
+- **Healthy (0):** the required measurements and mesh comparison are available,
+  with no detected issues.
+- **Problems found (1):** at least one issue needs attention, including low CSI
+  window coverage. Any unavailable measurements are also listed.
+- **Insufficient measurements (2):** health cannot be confirmed because readings
+  or the mesh comparison are unavailable, invalid, or calibration is in progress.
+
+`calibrate` waits up to 60 seconds after the start request for the device to
+report both `calibrating=false` and `ready=true`. It exits with code 1 if completion
+is not confirmed within that period, instead of printing success. Completion
+confirms device readiness; use `doctor` and `watch` to assess detection quality.
+
 A healthy result: RSSI **better than −65 dBm**, CSI **occupancy ~90 %**,
 calibrated **threshold ~0.03–0.1**, and `watch` showing ~0.001 when still and
 0.8+ when you move.
@@ -217,3 +239,14 @@ depend on the room, furniture, RF environment, and calibration. It is not
 "X-ray vision," and through-wall behavior is not guaranteed. Test in your own
 space. This is a hobbyist project with no affiliation to Apple, Espressif,
 Waveshare, or the ESPectre project.
+
+## Testing the helper scripts
+
+Run the device-independent regression tests with:
+
+```bash
+python3 -m unittest discover -s tests -v
+```
+
+These tests simulate API responses; they do not replace a real-device or Apple
+Home integration test.
